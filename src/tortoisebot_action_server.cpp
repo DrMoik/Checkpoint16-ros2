@@ -33,7 +33,7 @@ public:
     _sub_odom = this->create_subscription<nav_msgs::msg::Odometry>(
         "/odom", 10, std::bind(&WaypointActionServer::odom_callback, this, _1));
 
-    _yaw_precision = M_PI / 90; // +/- 2 degrees allowed
+    _yaw_precision = M_PI / 45;
     _dist_precision = 0.05;
   }
 
@@ -124,13 +124,14 @@ private:
           RCLCPP_INFO(this->get_logger(), "Fixing yaw");
           _state = "fix yaw";
           auto twist_msg = geometry_msgs::msg::Twist();
-          twist_msg.angular.z = std::clamp(5 * err_yaw, -0.65, 0.65);
+          twist_msg.angular.z = std::clamp(15 * err_yaw, -0.65, 0.65);
           _pub_cmd_vel->publish(twist_msg);
         } else {
           RCLCPP_INFO(this->get_logger(), "Going to point");
           _state = "go to point";
           auto twist_msg = geometry_msgs::msg::Twist();
-          twist_msg.linear.x = 0.6; // Adjust speed as necessary
+          twist_msg.linear.x = std::clamp(10 * err_pos, -0.85,
+                                          0.85); // Adjust speed as necessary
           twist_msg.angular.z = 0;
           _pub_cmd_vel->publish(twist_msg);
         }

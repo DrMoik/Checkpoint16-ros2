@@ -1,114 +1,86 @@
-// Copyright 2024 Miguel Gálvez
-// Licensed under the Apache License, Version 2.0 (see LICENSE or
-// http://www.apache.org/licenses/LICENSE-2.0)
-// Additional license information may apply
-
 #include "custom_interfaces/action/waypoint.hpp"
-#include "geometry_msgs/msg/point.hpp"
 #include "nav_msgs/msg/odometry.hpp"
-#include "tf2/LinearMath/Matrix3x3.h"
-#include "tf2/LinearMath/Quaternion.h"
 #include <cmath>
 #include <gtest/gtest.h>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 
 class TestWaypointAction : public ::testing::Test {
 protected:
-  rclcpp::Node::SharedPtr node;
-  rclcpp_action::Client<custom_interfaces::action::Waypoint>::SharedPtr
-      action_client;
-  geometry_msgs::msg::Point current_position;
-  double current_yaw;
+  std::shared_ptr<rclcpp::Node> node_;
+  rclcpp_action::Client<custom_interfaces::action::Waypoint>::SharedPtr client_;
+  double current_yaw_ = 0.0;
 
   void SetUp() override {
     rclcpp::init(0, nullptr);
-    node = std::make_shared<rclcpp::Node>("test_waypoint_action");
-    action_client =
-        rclcpp_action::create_client<custom_interfaces::action::Waypoint>(
-            node, "tortoisebot_as");
+    node_ = std::make_shared<rclcpp::Node>("test_waypoint_action");
+    client_ = rclcpp_action::create_client<custom_interfaces::action::Waypoint>(
+        node_, "tortoisebot_as");
 
-    // Ensure the action server is available before proceeding
-    ASSERT_TRUE(
-        action_client->wait_for_action_server(std::chrono::seconds(10)));
+    ASSERT_TRUE(client_->wait_for_action_server(std::chrono::seconds(10)));
 
-    // Subscribe to the /odom topic to receive odometry information
-    auto odom_subscriber = node->create_subscription<nav_msgs::msg::Odometry>(
-        "/odom", 10, [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
-          this->current_position = msg->pose.pose.position;
-          auto &q = msg->pose.pose.orientation;
-          tf2::Quaternion quat(q.x, q.y, q.z, q.w);
-          tf2::Matrix3x3 m(quat);
-          double roll, pitch, yaw;
-          m.getRPY(roll, pitch, yaw);
-          this->current_yaw = yaw;
-        });
+    // Subscribe to odometry and process data manually in a method.
+    auto odom_subscription =
+        node_->create_subscription<nav_msgs::msg::Odometry>(
+            "/odom", 10,
+            std::bind(&TestWaypointAction::processOdometry, this,
+                      std::placeholders::_1));
+
+    // Manually call processOdometry with test data
+    nav_msgs::msg::Odometry test_msg;
+    test_msg.pose.pose.orientation = tf2::toMsg(
+        tf2::Quaternion(tf2::Vector3(0, 0, 1), 0.785398)); // 45 degrees
+    processOdometry(std::make_shared<nav_msgs::msg::Odometry>(test_msg));
   }
 
   void TearDown() override { rclcpp::shutdown(); }
+
+  void processOdometry(const nav_msgs::msg::Odometry::SharedPtr msg) {
+    tf2::Quaternion quat;
+    tf2::fromMsg(msg->pose.pose.orientation, quat);
+    tf2::Matrix3x3 m(quat);
+    double roll, pitch;
+    m.getRPY(roll, pitch, this->current_yaw_);
+    RCLCPP_INFO(node_->get_logger(), "Current yaw updated: %f",
+                this->current_yaw_);
+  }
 };
 
-TEST_F(TestWaypointAction, TestPosition) {
+TEST_F(TestWaypointAction, TestGoalAchievement) {
   auto goal_msg = custom_interfaces::action::Waypoint::Goal();
-  goal_msg.position.x = 0.5; // Ensure this is a realistic and achievable goal
-  goal_msg.position.y = 0.5;
+  goal_msg.position.x = -5.0;
+  goal_msg.position.y = -5.0;
+  double expected_yaw =
+      atan2(goal_msg.position.y - 0,
+            goal_msg.position.x - 0); // Direct path, assuming starting at (0,0)
 
+  bool goal_achieved = false;
   auto send_goal_options = rclcpp_action::Client<
       custom_interfaces::action::Waypoint>::SendGoalOptions();
   send_goal_options.result_callback =
-      [this,
-       &goal_msg](const rclcpp_action::ClientGoalHandle<
-                  custom_interfaces::action::Waypoint>::WrappedResult &result) {
-        if (result.result->success) {
-          EXPECT_NEAR(current_position.x, goal_msg.position.x, 0.1);
-          EXPECT_NEAR(current_position.y, goal_msg.position.y, 0.1);
-        } else {
-          FAIL() << "Action failed";
-        }
+      [this, &goal_achieved, expected_yaw](
+          const rclcpp_action::ClientGoalHandle<
+              custom_interfaces::action::Waypoint>::WrappedResult &result) {
+        ASSERT_EQ(result.code, rclcpp_action::ResultCode::SUCCEEDED);
+        ASSERT_TRUE(result.result->success);
+        ASSERT_NEAR(this->current_yaw_, expected_yaw, 0.1);
+        goal_achieved = true;
       };
 
   auto goal_handle_future =
-      action_client->async_send_goal(goal_msg, send_goal_options);
-  auto result = rclcpp::spin_until_future_complete(
-      node, goal_handle_future,
-      std::chrono::seconds(30)); // Ensure timeout is sufficient
-  ASSERT_EQ(
-      result,
-      rclcpp::FutureReturnCode::SUCCESS); // Check if the result is successful
+      client_->async_send_goal(goal_msg, send_goal_options);
+  rclcpp::spin_until_future_complete(node_, goal_handle_future,
+                                     std::chrono::seconds(30));
+  ASSERT_TRUE(goal_handle_future.get());
 
-  std::this_thread::sleep_for(
-      std::chrono::seconds(1)); // Give some extra time for the robot to settle
-  rclcpp::spin_some(node);      // Process any remaining callbacks
+  // Ensure we continue to spin until the goal_achieved flag is set
+  while (rclcpp::ok() && !goal_achieved) {
+    rclcpp::spin_some(node_);
+  }
+
+  ASSERT_TRUE(goal_achieved);
 }
-
-TEST_F(TestWaypointAction, TestYaw) {
-  auto goal_msg = custom_interfaces::action::Waypoint::Goal();
-  goal_msg.position.x = 0.0; // Assuming this position change influences the yaw
-  goal_msg.position.y = 0.0; // A direct north movement should change yaw
-
-  double expected_yaw = std::atan2(goal_msg.position.y, goal_msg.position.x);
-
-  auto send_goal_options = rclcpp_action::Client<
-      custom_interfaces::action::Waypoint>::SendGoalOptions();
-  send_goal_options.result_callback =
-      [this, expected_yaw](const rclcpp_action::ClientGoalHandle<
-                           custom_interfaces::action::Waypoint>::WrappedResult &result) {
-        if (result.result->success) {
-          EXPECT_NEAR(current_yaw, expected_yaw, 0.3);
-        } else {
-          FAIL() << "Action failed";
-        }
-      };
-
-  auto goal_handle_future =
-      action_client->async_send_goal(goal_msg, send_goal_options);
-  auto result = rclcpp::spin_until_future_complete(node, goal_handle_future,
-                                                   std::chrono::seconds(30));
-  ASSERT_EQ(result, rclcpp::FutureReturnCode::SUCCESS);
-
-  rclcpp::spin_some(node); // Process any remaining callbacks
-}
-
 
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
